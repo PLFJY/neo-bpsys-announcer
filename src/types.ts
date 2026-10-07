@@ -20,6 +20,7 @@ export interface Announcement {
 
 export interface ManifestEntry {
   id: string
+  path: string
   publishedAt: string
   updatedAt: string
   enabled: boolean
