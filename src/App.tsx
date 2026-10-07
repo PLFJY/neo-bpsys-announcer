@@ -1,226 +1,236 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
-import {
-  Badge, Button, Card, Checkbox, Dropdown, Field, Input, Menu, MenuItem, MenuList, MenuPopover,
-  MenuTrigger, MessageBar, MessageBarBody, Option, OverlayDrawer, DrawerBody, DrawerFooter,
-  DrawerHeader, DrawerHeaderTitle, Spinner, Tab, TabList, Text, Textarea, Title1, Title2,
-} from '@fluentui/react-components'
-import { Add24Regular, Dismiss24Regular, Edit20Regular, MoreHorizontal20Regular } from '@fluentui/react-icons'
-import MarkdownIt from 'markdown-it'
-import { channels, languages, type AdminListItem, type AnnouncementDetail, type Channel, type Language, type Level, type Translations } from './types'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Field, Input, MessageBar, MessageBarBody, Spinner } from '@fluentui/react-components'
+import { ArrowRight20Regular, Eye20Regular, EyeOff20Regular, Megaphone24Regular, SignOut20Regular } from '@fluentui/react-icons'
+import AnnouncementEditor from './AnnouncementEditor'
+import AnnouncementList from './AnnouncementList'
+import { api, errorMessage, isAbort, statusOf } from './api'
+import { createSession, draftKey, formPayload, isDirty, readDraft, validateForm, type AnnouncementForm, type EditorSession } from './editor-model'
+import { ThemePicker } from './theme'
+import type { AdminListItem, AnnouncementDetail } from './types'
 
-const languageNames: Record<Language, string> = { 'zh-CN': '中文', 'en-US': 'English', 'ja-JP': '日本語' }
-const levelNames: Record<Level, string> = { info: 'Info', warning: 'Warning', critical: 'Critical' }
-const channelNames: Record<Channel, string> = { release: 'Release', beta: 'Beta', preview: 'Preview' }
-const emptyTranslations = (): Translations => ({ 'zh-CN': '', 'en-US': '', 'ja-JP': '' })
-const markdown = new MarkdownIt({ html: false, linkify: true, breaks: false })
-
-interface FormData {
-  publishedAt: string
-  level: Level
-  title: Translations
-  content: Translations
-  minAppVersion: string
-  maxAppVersion: string
-  channels: Channel[]
-}
-
-const localDateTime = (value: string) => {
-  const date = new Date(value)
-  const pad = (number: number) => String(number).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-function newForm(): FormData {
-  return { publishedAt: localDateTime(new Date().toISOString()), level: 'info', title: emptyTranslations(), content: emptyTranslations(), minAppVersion: '', maxAppVersion: '', channels: [...channels] }
-}
-
-function formFromDetail(detail: AnnouncementDetail): FormData {
-  const item = detail.announcement
-  return { publishedAt: localDateTime(item.publishedAt), level: item.level, title: { ...item.title }, content: { ...item.content }, minAppVersion: item.minAppVersion || '', maxAppVersion: item.maxAppVersion || '', channels: [...item.channels] }
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(path, { credentials: 'same-origin', ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
-  } catch { throw new Error('网络连接失败，请稍后重试。') }
-  const data = await response.json().catch(() => ({})) as T & { error?: string }
-  if (!response.ok) {
-    const error = new Error(data.error || `请求失败（${response.status}）`) as Error & { status?: number }
-    error.status = response.status
-    throw error
-  }
-  return data
-}
-
-const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请稍后重试。'
-const isUnauthorized = (error: unknown) => error instanceof Error && 'status' in error && error.status === 401
-const dateLabel = (date: string) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(date))
+type AuthState = 'checking' | 'signedIn' | 'signedOut' | 'error'
+type BusyState = { kind: string; id?: string } | null
+interface Confirmation { title: string; message: string; label: string; action: () => void }
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null)
+  const [auth, setAuth] = useState<AuthState>('checking')
+  const authRef = useRef<AuthState>('checking')
+  const [authAttempt, setAuthAttempt] = useState(0)
+  const [authError, setAuthError] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [items, setItems] = useState<AdminListItem[]>([])
-  const [drawerOpen, setDrawerOpen] = useState(false)
-  const [form, setForm] = useState<FormData>(newForm)
-  const [detail, setDetail] = useState<AnnouncementDetail | null>(null)
-  const [language, setLanguage] = useState<Language>('zh-CN')
-  const [preview, setPreview] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [listState, setListState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [listError, setListError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
+  const [editor, setEditor] = useState<EditorSession | null>(readDraft)
+  const [editorVisible, setEditorVisible] = useState(false)
+  const [editorError, setEditorError] = useState<{ message: string; status: number } | null>(null)
+  const [draftStored, setDraftStored] = useState(false)
+  const [busy, setBusy] = useState<BusyState>(null)
+  const operationLock = useRef(false)
+  const listRequest = useRef<{ sequence: number; controller: AbortController | null }>({ sequence: 0, controller: null })
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
 
-  const handleError = useCallback((reason: unknown) => {
-    if (isUnauthorized(reason)) { setAuthenticated(false); setItems([]); setDrawerOpen(false) }
-    setError(message(reason))
-  }, [])
-
-  const loadItems = useCallback(async () => {
-    try { setItems(await api<AdminListItem[]>('/api/admin/announcements')); setError('') }
-    catch (reason) { handleError(reason) }
-  }, [handleError])
+  const changeAuth = useCallback((next: AuthState) => { authRef.current = next; setAuth(next) }, [])
+  const expire = useCallback(() => {
+    listRequest.current.controller?.abort()
+    listRequest.current.sequence++
+    changeAuth('signedOut')
+    setItems([]); setListState('idle'); setListError(''); setActionError(''); setNotice('')
+    setPassword('')
+    setAuthError('登录已过期，请重新登录。未提交的编辑内容已保留。')
+    setConfirmation(null)
+  }, [changeAuth])
 
   useEffect(() => {
-    api('/api/auth/session').then(() => setAuthenticated(true)).catch(() => setAuthenticated(false))
-  }, [])
-  useEffect(() => { if (authenticated) void loadItems() }, [authenticated, loadItems])
+    const controller = new AbortController()
+    changeAuth('checking')
+    api<{ authenticated: boolean }>('/api/auth/session', { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) { changeAuth(data.authenticated ? 'signedIn' : 'signedOut'); setAuthError('') }
+    }).catch(reason => {
+      if (isAbort(reason) || controller.signal.aborted) return
+      if (statusOf(reason) === 401) { changeAuth('signedOut'); setAuthError('') }
+      else { changeAuth('error'); setAuthError(errorMessage(reason)) }
+    })
+    return () => controller.abort()
+  }, [authAttempt, changeAuth])
 
+  const loadItems = useCallback(async () => {
+    if (authRef.current !== 'signedIn') return
+    listRequest.current.controller?.abort()
+    const controller = new AbortController()
+    const sequence = ++listRequest.current.sequence
+    listRequest.current.controller = controller
+    setListState('loading'); setListError('')
+    try {
+      const result = await api<AdminListItem[]>('/api/admin/announcements', { signal: controller.signal })
+      if (!Array.isArray(result)) throw new Error('公告列表响应无效，请重新加载。')
+      if (sequence !== listRequest.current.sequence || authRef.current !== 'signedIn') return
+      setItems(result); setListState('ready')
+    } catch (reason) {
+      if (isAbort(reason) || sequence !== listRequest.current.sequence) return
+      if (statusOf(reason) === 401) expire()
+      else { setListError(errorMessage(reason)); setListState('error') }
+    }
+  }, [expire])
+  useEffect(() => {
+    if (auth === 'signedIn') void loadItems()
+    return () => { listRequest.current.controller?.abort(); listRequest.current.sequence++ }
+  }, [auth, loadItems])
+
+  useEffect(() => {
+    setDraftStored(false)
+    if (!editor || !isDirty(editor)) {
+      try { sessionStorage.removeItem(draftKey) } catch { /* Storage can be disabled. */ }
+      return
+    }
+    const timer = window.setTimeout(() => {
+      try { sessionStorage.setItem(draftKey, JSON.stringify(editor)); setDraftStored(true) } catch { setDraftStored(false) }
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [editor])
+  useEffect(() => {
+    if (!editor || !isDirty(editor)) return
+    const preventLoss = (event: BeforeUnloadEvent) => {
+      try { sessionStorage.setItem(draftKey, JSON.stringify(editor)) } catch { /* The leave confirmation still protects the draft. */ }
+      event.preventDefault(); event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', preventLoss)
+    return () => window.removeEventListener('beforeunload', preventLoss)
+  }, [editor])
+
+  function begin(kind: string, id?: string) {
+    if (operationLock.current) return false
+    operationLock.current = true
+    setBusy({ kind, id })
+    return true
+  }
+  function finish() { operationLock.current = false; setBusy(null) }
+  function fail(reason: unknown) {
+    if (statusOf(reason) === 401) expire()
+    else setActionError(errorMessage(reason))
+  }
   async function login(event: FormEvent) {
     event.preventDefault()
-    setBusy(true); setError('')
+    if (!username.trim() || !password || !begin('login')) return
+    setAuthError('')
     try {
       await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
-      setPassword(''); setAuthenticated(true)
-    } catch (reason) { handleError(reason) }
-    finally { setBusy(false) }
+      setPassword(''); setShowPassword(false); changeAuth('signedIn')
+    } catch (reason) { setAuthError(errorMessage(reason)) }
+    finally { finish() }
   }
-
   async function logout() {
-    try { await api('/api/auth/logout', { method: 'POST' }) }
-    catch (reason) { handleError(reason) }
-    setAuthenticated(false); setItems([]); setDrawerOpen(false)
+    if (!begin('logout')) return
+    setActionError('')
+    try {
+      await api('/api/auth/logout', { method: 'POST' })
+      changeAuth('signedOut'); setItems([]); setListState('idle'); setPassword(''); setNotice(''); setAuthError('')
+    } catch (reason) { fail(reason) }
+    finally { finish() }
   }
-
+  function requestLogout() {
+    if (editor && isDirty(editor)) setConfirmation({ title: '退出登录？', message: '草稿会保留在当前标签页中。重新登录后可以继续编辑。', label: '退出登录', action: () => void logout() })
+    else void logout()
+  }
+  function replaceDraft(action: () => void) {
+    if (operationLock.current) return
+    if (editor && isDirty(editor)) setConfirmation({ title: '放弃当前草稿？', message: '开始其他公告前，需要放弃当前未提交的编辑内容。', label: '放弃并继续', action })
+    else action()
+  }
   function startCreate() {
-    setDetail(null); setForm(newForm()); setLanguage('zh-CN'); setPreview(false); setError(''); setDrawerOpen(true)
+    replaceDraft(() => { setEditor(createSession()); setEditorVisible(true); setEditorError(null); setActionError(''); setNotice('') })
   }
-
-  async function openExisting(id: string, copy: boolean) {
-    setBusy(true); setError('')
+  async function openExisting(id: string, copy = false) {
+    if (!begin(copy ? 'copy' : 'open', id)) return
+    setActionError('')
     try {
-      const loaded = await api<AnnouncementDetail>(`/api/admin/announcements/${id}`)
-      setDetail(copy ? null : loaded)
-      setForm(formFromDetail(loaded))
-      if (copy) setForm(current => ({ ...current, publishedAt: localDateTime(new Date().toISOString()) }))
-      setLanguage('zh-CN'); setPreview(false); setDrawerOpen(true)
-    } catch (reason) { handleError(reason) }
-    finally { setBusy(false) }
+      const result = await api<AnnouncementDetail>(`/api/admin/announcements/${id}`)
+      setEditor(createSession(result, copy)); setEditorError(null); setEditorVisible(true); setNotice('')
+    } catch (reason) { fail(reason) }
+    finally { finish() }
   }
-
+  function backToList() {
+    if (operationLock.current) return
+    if (editor && !isDirty(editor)) setEditor(null)
+    setEditorVisible(false)
+    void loadItems()
+  }
+  function discardDraft() {
+    setConfirmation({ title: '放弃这份草稿？', message: '未提交的编辑内容将被丢弃，已发布的公告不会受到影响。', label: '放弃草稿', action: () => { setEditor(null); setEditorVisible(false); setEditorError(null) } })
+  }
+  function updateForm(update: (form: AnnouncementForm) => AnnouncementForm) {
+    setEditor(current => current ? { ...current, form: update(current.form) } : null)
+  }
+  function upsert(result: AnnouncementDetail) {
+    const item: AdminListItem = { ...result.entry, title: result.announcement.title, level: result.announcement.level }
+    setItems(current => [item, ...current.filter(value => value.id !== item.id)])
+  }
+  async function save() {
+    if (!editor || validateForm(editor.form).length || !begin('save')) return
+    setEditorError(null); setActionError(''); setNotice('')
+    const current = editor
+    const payload = formPayload(current)
+    try {
+      const result = current.detail
+        ? await api<AnnouncementDetail>(`/api/admin/announcements/${current.detail.announcement.id}`, { method: 'PUT', body: JSON.stringify({ ...payload, fileSha: current.detail.fileSha, manifestSha: current.detail.manifestSha }) })
+        : await api<AnnouncementDetail>('/api/admin/announcements', { method: 'POST', body: JSON.stringify(payload) })
+      upsert(result); setEditor(null); setEditorVisible(false); setListState('ready')
+      setNotice(current.detail ? '公告修改已保存。' : `公告 ${result.announcement.id} 已发布。`)
+      void loadItems()
+    } catch (reason) {
+      if (statusOf(reason) === 401) expire()
+      else setEditorError({ message: statusOf(reason) === 409 ? '公告或列表版本已发生变化。你的编辑内容已保留，请核对最新版本后再保存。' : errorMessage(reason), status: statusOf(reason) })
+    } finally { finish() }
+  }
+  function reloadEditor() {
+    if (!editor?.detail) return
+    const id = editor.detail.announcement.id
+    setConfirmation({ title: '载入最新版本？', message: '最新公告将替换当前未提交的编辑内容。也可以先返回编辑器，将内容复制为新公告。', label: '载入最新版本', action: () => void openExisting(id) })
+  }
+  function copyDraft() {
+    if (!editor || operationLock.current) return
+    const session = createSession(editor.detail, true)
+    setEditor({ ...session, form: { ...editor.form, publishedAt: session.initial.publishedAt } }); setEditorError(null)
+  }
   async function toggleEnabled(item: AdminListItem) {
-    setBusy(true); setError(''); setNotice('')
+    if (!begin('toggle', item.id)) return
+    setActionError(''); setNotice('')
     try {
-      const loaded = await api<AnnouncementDetail>(`/api/admin/announcements/${item.id}`)
-      await api(`/api/admin/announcements/${item.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !item.enabled, manifestSha: loaded.manifestSha }) })
-      await loadItems()
-      setNotice(item.enabled ? '公告已停用。' : '公告已启用。')
-    } catch (reason) { handleError(reason) }
-    finally { setBusy(false) }
-  }
-
-  async function save(event: FormEvent) {
-    event.preventDefault()
-    if (!form.title['zh-CN'].trim() || !form.content['zh-CN'].trim()) { setError('请填写中文标题和正文。'); return }
-    if (!form.channels.length) { setError('请至少选择一个渠道。'); return }
-    const date = new Date(form.publishedAt)
-    if (Number.isNaN(date.getTime())) { setError('发布时间无效。'); return }
-    setBusy(true); setError(''); setNotice('')
-    const payload = {
-      publishedAt: date.toISOString(), level: form.level, title: form.title, content: form.content,
-      minAppVersion: form.minAppVersion.trim() || null, maxAppVersion: form.maxAppVersion.trim() || null,
-      channels: form.channels,
-    }
-    try {
-      if (detail) {
-        await api(`/api/admin/announcements/${detail.announcement.id}`, { method: 'PUT', body: JSON.stringify({ ...payload, fileSha: detail.fileSha, manifestSha: detail.manifestSha }) })
-      } else {
-        await api('/api/admin/announcements', { method: 'POST', body: JSON.stringify(payload) })
+      const current = await api<AnnouncementDetail>(`/api/admin/announcements/${item.id}`)
+      if (current.entry.enabled !== item.enabled) {
+        upsert(current)
+        setActionError('公告状态已被其他操作修改，列表已更新。请确认状态后重试。')
+        return
       }
-      setDrawerOpen(false); await loadItems(); setNotice(detail ? '公告已更新。' : '公告已发布。')
-    } catch (reason) { handleError(reason) }
-    finally { setBusy(false) }
+      const result = await api<AnnouncementDetail>(`/api/admin/announcements/${item.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !item.enabled, manifestSha: current.manifestSha }) })
+      upsert(result); setNotice(item.enabled ? '公告已停用，内容仍然保留。' : '公告已启用。')
+      void loadItems()
+    } catch (reason) { fail(reason) }
+    finally { finish() }
+  }
+  function requestToggle(item: AdminListItem) {
+    setConfirmation({ title: item.enabled ? '停用这条公告？' : '启用这条公告？', message: `「${item.title['zh-CN'] || item.id}」${item.enabled ? '将从客户端公开列表中移除，内容仍会保留。' : '将对所选渠道及版本范围内的客户端可见。'}`, label: item.enabled ? '停用公告' : '启用公告', action: () => void toggleEnabled(item) })
   }
 
-  const previewHtml = useMemo(() => markdown.render(form.content[language]), [form.content, language])
+  const dialog = <Dialog open={Boolean(confirmation)} onOpenChange={(_, data) => { if (!data.open) setConfirmation(null) }}>
+    <DialogSurface><DialogBody><DialogTitle>{confirmation?.title}</DialogTitle><DialogContent>{confirmation?.message}</DialogContent><DialogActions><Button type="button" onClick={() => setConfirmation(null)}>取消</Button><Button type="button" appearance="primary" onClick={() => { const action = confirmation?.action; setConfirmation(null); action?.() }}>{confirmation?.label}</Button></DialogActions></DialogBody></DialogSurface>
+  </Dialog>
 
-  if (authenticated === null) return <div className="center-screen"><Spinner label="正在检查登录状态…" /></div>
-  if (!authenticated) return (
-    <main className="login-page">
-      <Card className="login-card">
-        <Text className="eyebrow">neo-bpsys</Text>
-        <Title1>Announcement Center</Title1>
-        <Text className="subtle">登录以管理应用公告</Text>
-        {error && <MessageBar intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
-        <form onSubmit={login} className="stack">
-          <Field label="Username" required><Input autoComplete="username" value={username} onChange={(_, data) => setUsername(data.value)} required /></Field>
-          <Field label="Password" required><Input type="password" autoComplete="current-password" value={password} onChange={(_, data) => setPassword(data.value)} required /></Field>
-          <Button appearance="primary" type="submit" disabled={busy}>{busy ? '登录中…' : '登录'}</Button>
-        </form>
-      </Card>
-    </main>
-  )
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div><Text className="brand">neo-bpsys</Text><Text className="brand-title">Announcement Center</Text></div>
-        <div className="header-actions"><Button appearance="primary" icon={<Add24Regular />} onClick={startCreate}>发布公告</Button><Button appearance="subtle" onClick={() => void logout()}>退出</Button></div>
-      </header>
-      <section className="content">
-        <div className="section-heading"><div><Title2>公告</Title2><Text className="subtle">管理发布给 neo-bpsys 客户端的消息</Text></div><Text className="count">{items.length} 条公告</Text></div>
-        {error && <MessageBar intent="error" className="status"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
-        {notice && <MessageBar intent="success" className="status"><MessageBarBody>{notice}</MessageBarBody></MessageBar>}
-        {items.length === 0 && <Card className="empty-card"><Text>还没有公告。点击“发布公告”创建第一条。</Text></Card>}
-        <div className="announcement-list">
-          {items.map(item => (
-            <Card key={item.id} className={`announcement-card ${item.enabled ? '' : 'disabled-card'}`}>
-              <div className="card-main">
-                <div className="card-title-row"><Text weight="semibold" size={500}>{item.title['zh-CN'] || item.title['en-US'] || item.id}</Text><Badge appearance="tint" color={item.level === 'critical' ? 'danger' : item.level === 'warning' ? 'warning' : 'informative'}>{levelNames[item.level]}</Badge>{!item.enabled && <Badge appearance="outline">已停用</Badge>}</div>
-                <Text className="card-meta">{dateLabel(item.publishedAt)} · {item.channels.map(channel => channelNames[channel]).join(' · ')}</Text>
-                <Text className="card-id">{item.id} · 修订 {item.revision}</Text>
-              </div>
-              <div className="card-actions"><Button appearance="subtle" icon={<Edit20Regular />} disabled={busy} onClick={() => void openExisting(item.id, false)}>编辑</Button>
-                <Menu><MenuTrigger disableButtonEnhancement><Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="更多操作" disabled={busy} /></MenuTrigger><MenuPopover><MenuList>
-                  <MenuItem onClick={() => void openExisting(item.id, false)}>编辑</MenuItem>
-                  <MenuItem onClick={() => void toggleEnabled(item)}>{item.enabled ? '停用' : '启用'}</MenuItem>
-                  <MenuItem onClick={() => void openExisting(item.id, true)}>复制</MenuItem>
-                </MenuList></MenuPopover></Menu>
-              </div>
-            </Card>
-          ))}
-        </div>
-      </section>
-
-      <OverlayDrawer open={drawerOpen} onOpenChange={(_, data) => setDrawerOpen(data.open)} position="end" size="large" className="editor-drawer">
-        <DrawerHeader><DrawerHeaderTitle action={<Button appearance="subtle" icon={<Dismiss24Regular />} aria-label="关闭" onClick={() => setDrawerOpen(false)} />}>{detail ? '编辑公告' : '发布公告'}</DrawerHeaderTitle></DrawerHeader>
-        <form onSubmit={save} className="drawer-form">
-          <DrawerBody>
-            <div className="drawer-fields">
-              {error && <MessageBar intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
-              <Field label="类型"><Dropdown value={levelNames[form.level]} selectedOptions={[form.level]} onOptionSelect={(_, data) => setForm(current => ({ ...current, level: data.optionValue as Level }))}>{(['info', 'warning', 'critical'] as const).map(level => <Option key={level} value={level}>{levelNames[level]}</Option>)}</Dropdown></Field>
-              <Field label="发布时间"><Input type="datetime-local" value={form.publishedAt} onChange={(_, data) => setForm(current => ({ ...current, publishedAt: data.value }))} required /></Field>
-              <Field label="渠道"><div className="channel-options">{channels.map(channel => <Checkbox key={channel} label={channelNames[channel]} checked={form.channels.includes(channel)} onChange={(_, data) => setForm(current => ({ ...current, channels: data.checked ? [...current.channels, channel] : current.channels.filter(value => value !== channel) }))} />)}</div></Field>
-              <div className="version-fields"><Field label="Min Version"><Input placeholder="例如 1.2.0" value={form.minAppVersion} onChange={(_, data) => setForm(current => ({ ...current, minAppVersion: data.value }))} /></Field><Field label="Max Version"><Input placeholder="可留空" value={form.maxAppVersion} onChange={(_, data) => setForm(current => ({ ...current, maxAppVersion: data.value }))} /></Field></div>
-              <div className="language-block"><TabList selectedValue={language} onTabSelect={(_, data) => { setLanguage(data.value as Language); setPreview(false) }}>{languages.map(lang => <Tab key={lang} value={lang}>{languageNames[lang]}</Tab>)}</TabList></div>
-              <Field label={`标题${language === 'zh-CN' ? ' *' : ''}`}><Input value={form.title[language]} onChange={(_, data) => setForm(current => ({ ...current, title: { ...current.title, [language]: data.value } }))} /></Field>
-              <div className="markdown-heading"><Text weight="semibold">Markdown{language === 'zh-CN' ? ' *' : ''}</Text><div><Button size="small" appearance={preview ? 'subtle' : 'primary'} onClick={() => setPreview(false)}>编辑</Button><Button size="small" appearance={preview ? 'primary' : 'subtle'} onClick={() => setPreview(true)}>预览</Button></div></div>
-              {preview ? <div className="markdown-preview" dangerouslySetInnerHTML={{ __html: previewHtml }} /> : <Textarea className="markdown-input" resize="vertical" placeholder="用 Markdown 编写公告内容…" value={form.content[language]} onChange={(_, data) => setForm(current => ({ ...current, content: { ...current.content, [language]: data.value } }))} />}
-            </div>
-          </DrawerBody>
-          <DrawerFooter><Button appearance="secondary" onClick={() => setDrawerOpen(false)}>取消</Button><Button appearance="primary" type="submit" disabled={busy}>{busy ? '保存中…' : detail ? '保存修改' : '发布公告'}</Button></DrawerFooter>
-        </form>
-      </OverlayDrawer>
-    </main>
-  )
+  if (auth === 'checking' || auth === 'error') return <main className="session-page"><div className="session-theme"><ThemePicker /></div><div className="session-card"><div className="brand-mark">N</div>{auth === 'checking' ? <Spinner label="正在连接公告中心…" /> : <><h1>暂时无法连接</h1><p className="muted">{authError}</p><Button type="button" appearance="primary" onClick={() => setAuthAttempt(value => value + 1)}>重新连接</Button></>}</div></main>
+  if (auth === 'signedOut') return <main className="login-page">
+    <section className="login-story"><div className="login-brand"><span className="brand-mark">N</span><span>neo-bpsys <small>ANNOUNCEMENT CENTER</small></span></div><div className="login-story-content"><span className="eyebrow">每一次更新，都值得被看见</span><h1>清晰传达。<br />从这里开始。</h1><p>统一管理应用公告，<br />让重要的信息准确抵达。</p><div className="story-decoration" aria-hidden="true"><div><span className="decoration-dot" /><span /><span /></div><div><span className="decoration-dot" /><span /><span /></div><div><span className="decoration-dot" /><span /><span /></div></div></div><span className="login-story-footer">neo-bpsys · 公告管理控制台</span></section>
+    <section className="login-form-panel"><div className="login-theme"><ThemePicker /></div><div className="login-card"><span className="eyebrow">管理员入口</span><h2>欢迎回来</h2><p className="muted">登录以继续管理公告。</p>{authError && <MessageBar intent="error"><MessageBarBody>{authError}</MessageBarBody></MessageBar>}{editor && isDirty(editor) && <p className="login-draft-note">当前标签页有未提交的草稿，登录后可以继续编辑。</p>}
+      <form onSubmit={login} className="login-form"><Field label="用户名" required><Input size="large" autoComplete="username" value={username} onChange={(_, data) => setUsername(data.value)} required disabled={Boolean(busy)} /></Field><Field label="密码" required><Input size="large" type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={(_, data) => setPassword(data.value)} required disabled={Boolean(busy)} contentAfter={<Button type="button" appearance="transparent" size="small" icon={showPassword ? <EyeOff20Regular /> : <Eye20Regular />} aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)} />} /></Field><Button size="large" appearance="primary" type="submit" icon={busy ? <Spinner size="tiny" /> : <ArrowRight20Regular />} iconPosition="after" disabled={Boolean(busy)}>{busy ? '正在登录…' : '登录公告中心'}</Button></form><p className="login-footer">仅供授权管理员使用</p></div></section>
+  </main>
+  if (editor && editorVisible) return <><AnnouncementEditor key={editor.key} session={editor} busy={Boolean(busy)} error={editorError} draftStored={draftStored} onChange={updateForm} onBack={backToList} onSave={() => void save()} onReload={reloadEditor} onCopy={copyDraft} />{dialog}</>
+  return <main className="app-shell">
+    <aside className="sidebar"><div className="sidebar-brand"><span className="brand-mark">N</span><div>neo-bpsys<small>公告中心</small></div></div><div className="sidebar-section-label">工作空间</div><div className="sidebar-active" aria-current="page"><Megaphone24Regular />公告管理</div><div className="sidebar-bottom"><span className="sidebar-status-dot" />管理员工作空间<small>Announcement Center</small></div></aside>
+    <div className="main-workspace"><header className="topbar"><span className="topbar-title">公告中心 <span className="breadcrumb-separator">/</span><span className="breadcrumb-detail">内容管理</span></span><div className="topbar-actions"><ThemePicker /><span className="topbar-divider" /><Button type="button" appearance="subtle" icon={busy?.kind === 'logout' ? <Spinner size="tiny" /> : <SignOut20Regular />} onClick={requestLogout} disabled={Boolean(busy)}>退出登录</Button></div></header>
+      <AnnouncementList items={items} state={listState} error={listError} actionError={actionError} onDismissError={() => setActionError('')} busy={busy} hasDraft={Boolean(editor && isDirty(editor))} notice={notice} onDismissNotice={() => setNotice('')} onRefresh={() => void loadItems()} onCreate={startCreate} onEdit={(id, copy) => replaceDraft(() => void openExisting(id, copy))} onToggle={requestToggle} onResume={() => setEditorVisible(true)} onDiscard={discardDraft} />
+    </div>{dialog}
+  </main>
 }

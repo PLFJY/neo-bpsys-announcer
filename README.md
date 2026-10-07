@@ -21,6 +21,19 @@ GITCODE_TOKEN=your-gitcode-token
 
 本地开发使用 Wrangler 模拟 `SESSION_KV`。`pnpm build` 编译 React 和 Worker，`pnpm typecheck` 单独检查 TypeScript。
 
+## 管理界面
+
+登录页、列表和编辑器都支持浅色、深色与跟随系统，外观偏好在浏览器中保留。公告列表支持标题／编号搜索、状态和渠道筛选，以及按发布或更新时间排序。
+
+编辑器使用全页布局，可在编辑、预览和对照视图间切换。发布时间统一按北京时间输入与显示。返回列表会保留草稿，未提交的内容暂存于当前标签页，刷新或重新登录后可以继续编辑；放弃草稿需要确认。保存冲突时会保留输入，并提供载入最新版本或复制为新公告的操作。
+
+交互回归测试使用隔离浏览器与模拟 API，不读取管理员凭据，也不会修改 GitCode 公告：
+
+```bash
+pnpm exec playwright install chromium
+pnpm test
+```
+
 ## Cloudflare 配置与部署
 
 `wrangler.jsonc` 中已声明 `SESSION_KV`，但其 `id` 是占位符。先在 Cloudflare 创建 KV namespace，再仅替换这个 `id`。已有同名 namespace 时直接使用其 ID。不要用占位符部署。
