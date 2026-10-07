@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 function fixture() {
   const detail = (id: string, enabled: boolean, title: string) => ({
@@ -55,6 +55,65 @@ async function newDraft(page: Page) {
   await page.getByRole('button', { name: '创建公告', exact: true }).first().click()
   await page.getByLabel('公告标题').fill('新的产品更新')
   await page.getByRole('textbox', { name: '中文公告正文' }).fill('## 新功能\n\n欢迎使用。')
+}
+
+async function expectUncovered(locator: Locator) {
+  // Visibility assertions alone do not detect an opaque portal painted over the page.
+  await expect.poll(() => locator.evaluate(node => {
+    const bounds = node.getBoundingClientRect()
+    const hit = document.elementFromPoint(bounds.left + Math.min(8, bounds.width / 2), bounds.top + bounds.height / 2)
+    return hit !== null && node.contains(hit)
+  })).toBe(true)
+}
+
+for (const mode of ['light', 'dark'] as const) {
+  for (const width of [1440, 390]) {
+    test(`${mode} / ${width}px：登录、列表和编辑器的弹出菜单不遮住整页`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.emulateMedia({ colorScheme: mode })
+      const state = fixture(); state.authenticated = false
+      await mockApi(page, state)
+      await page.getByRole('button', { name: /^外观：/ }).click()
+      await expect(page.getByRole('menuitemradio', { name: '浅色模式' })).toBeVisible()
+      await page.screenshot({ animations: 'disabled', path: `test-results/theme-menu-login-${mode}-${width}.png`, fullPage: true })
+      await expectUncovered(page.getByRole('heading', { name: '欢迎回来' }))
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('menuitemradio', { name: '浅色模式' })).toHaveCount(0)
+      await page.getByLabel('用户名').fill('test-admin')
+      await page.getByLabel(/^密码/).fill('local-test-only')
+      await page.getByRole('button', { name: '登录公告中心' }).click()
+
+      const heading = page.getByRole('heading', { name: '公告管理' })
+      await expect(heading).toBeVisible()
+      await page.getByRole('button', { name: /^外观：/ }).click()
+      await expectUncovered(heading)
+      await page.screenshot({ animations: 'disabled', path: `test-results/theme-menu-list-${mode}-${width}.png`, fullPage: true })
+      await heading.click({ position: { x: 8, y: 8 } })
+      await expect(page.getByRole('menuitemradio', { name: '浅色模式' })).toHaveCount(0)
+      await page.getByRole('combobox', { name: '筛选渠道' }).click()
+      await expectUncovered(heading)
+      await page.getByRole('option', { name: 'Preview', exact: true }).click()
+      await page.getByRole('combobox', { name: '排序方式' }).click()
+      await expectUncovered(heading)
+      await page.getByRole('option', { name: '最近更新', exact: true }).click()
+      await expect(page.getByRole('combobox', { name: '排序方式' })).toContainText('最近更新')
+      await page.getByRole('button', { name: '更多操作：应用更新说明' }).click()
+      await expectUncovered(heading)
+      await page.keyboard.press('Escape')
+      await newDraft(page)
+
+      const editorHeading = page.getByRole('heading', { name: '创建公告' })
+      await editorHeading.scrollIntoViewIfNeeded()
+      await page.getByRole('button', { name: /^外观：/ }).click()
+      await expectUncovered(editorHeading)
+      await page.keyboard.press('Escape')
+      await page.getByRole('combobox', { name: '通知级别' }).click()
+      // The setting can be below the fold on mobile; check content beside the open dropdown.
+      await expectUncovered(page.getByRole('heading', { name: '发布设置' }))
+      await page.getByRole('option', { name: '重要提醒', exact: true }).click()
+      await expect(page.getByRole('combobox', { name: '通知级别' })).toContainText('重要提醒')
+    })
+  }
 }
 
 test('登录状态检查失败提供重试，不伪装成未登录', async ({ page }) => {

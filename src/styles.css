@@ -7,7 +7,7 @@ button { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--colorStrokeFocus2); outline-offset: 3px; }
 h1, h2, h3, p { margin: 0; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
-.fui-FluentProvider.theme-root { min-height: 100dvh; color: var(--colorNeutralForeground1); background: var(--colorNeutralBackground2); --page-bg: var(--colorNeutralBackground2); --surface-bg: var(--colorNeutralBackground1); --border: var(--colorNeutralStroke2); --muted: var(--colorNeutralForeground3); font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+.app-root { min-height: 100dvh; color: var(--colorNeutralForeground1); background: var(--colorNeutralBackground2); --page-bg: var(--colorNeutralBackground2); --surface-bg: var(--colorNeutralBackground1); --border: var(--colorNeutralStroke2); --muted: var(--colorNeutralForeground3); font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .muted, .field-hint { color: var(--muted); line-height: 1.65; }
 .field-hint { font-size: 12px; }
 .field-label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }

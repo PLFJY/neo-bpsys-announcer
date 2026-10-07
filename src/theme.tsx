@@ -33,7 +33,13 @@ export function ThemeRoot({ children }: { children: ReactNode }) {
     window.addEventListener('storage', sync)
     return () => window.removeEventListener('storage', sync)
   }, [])
-  return <ThemeContext.Provider value={{ mode, setMode }}><FluentProvider theme={dark ? webDarkTheme : webLightTheme} className="theme-root">{children}</FluentProvider></ThemeContext.Provider>
+  // FluentProvider forwards its classes to portals. Keep page layout on a child
+  // so menus and dialogs inherit the theme without inheriting the page's size/background.
+  return <ThemeContext.Provider value={{ mode, setMode }}>
+    <FluentProvider theme={dark ? webDarkTheme : webLightTheme}>
+      <div className="app-root">{children}</div>
+    </FluentProvider>
+  </ThemeContext.Provider>
 }
 
 export function ThemePicker() {
