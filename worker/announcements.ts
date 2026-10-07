@@ -21,7 +21,7 @@ function parseManifest(file: GitFile | null): Manifest {
   if (!file) return emptyManifest()
   const value = parseJson(file, 'manifest')
   if (!record(value) || value.schemaVersion !== 1 || !Array.isArray(value.announcements) || !value.announcements.every(item =>
-    record(item) && typeof item.id === 'string' && /^\d{8}-\d{3}$/.test(item.id) && validPath(item.path) && validDate(item.publishedAt) && validDate(item.updatedAt) &&
+    record(item) && typeof item.id === 'string' && /^\d{8}-\d{3}$/.test(item.id) && (item.path === undefined || validPath(item.path)) && validDate(item.publishedAt) && validDate(item.updatedAt) &&
     typeof item.enabled === 'boolean' && Number.isInteger(item.revision) && Number(item.revision) > 0 &&
     typeof item.sha256 === 'string' && /^[0-9a-f]{64}$/.test(item.sha256) && validVersion(item.minAppVersion) &&
     validVersion(item.maxAppVersion) && validChannels(item.channels)
@@ -107,7 +107,7 @@ export class AnnouncementStore {
     const { data, sha } = await this.manifest()
     const entry = data.announcements.find(item => item.id === id)
     if (!entry) throw new ApiError(404, '公告不存在。')
-    const file = await this.git.getFile(entry.path)
+    const file = await this.git.getFile(entry.path ?? announcementPath(id))
     if (!file) throw new ApiError(502, '公告文件不存在。')
     return { announcement: parseAnnouncement(file, id), entry, fileSha: file.sha, manifestSha: sha, actualSha256: await sha256(file.content) }
   }
@@ -115,7 +115,7 @@ export class AnnouncementStore {
   async list() {
     const { data } = await this.manifest()
     return Promise.all(data.announcements.map(async entry => {
-      const file = await this.git.getFile(entry.path)
+      const file = await this.git.getFile(entry.path ?? announcementPath(entry.id))
       if (!file) throw new ApiError(502, `公告 ${entry.id} 文件不存在。`)
       const announcement = parseAnnouncement(file, entry.id)
       return { ...entry, title: announcement.title, level: announcement.level }
@@ -154,10 +154,10 @@ export class AnnouncementStore {
     const announcement: Announcement = { schemaVersion: 1, id, publishedAt: input.publishedAt, updatedAt: now, level: input.level, title: input.title, content: input.content, minAppVersion: input.minAppVersion, maxAppVersion: input.maxAppVersion, channels: input.channels }
     const content = serialize(announcement)
     const hash = await sha256(content)
-    await this.git.updateFile(current.entry.path, content, current.fileSha, `Update announcement ${id}`)
+    await this.git.updateFile(current.entry.path ?? announcementPath(id), content, current.fileSha, `Update announcement ${id}`)
     const latest = await this.manifest()
     if (latest.sha !== manifestSha) throw new ApiError(409, '数据已被其他操作修改，请刷新后重试。')
-    const next: Manifest = ordered({ schemaVersion: 1, announcements: latest.data.announcements.map(entry => entry.id === id ? { ...entry, publishedAt: announcement.publishedAt, updatedAt: now, revision: entry.revision + 1, sha256: hash, minAppVersion: announcement.minAppVersion, maxAppVersion: announcement.maxAppVersion, channels: announcement.channels } : entry) })
+    const next: Manifest = ordered({ schemaVersion: 1, announcements: latest.data.announcements.map(entry => entry.id === id ? { ...entry, path: entry.path ?? announcementPath(id), publishedAt: announcement.publishedAt, updatedAt: now, revision: entry.revision + 1, sha256: hash, minAppVersion: announcement.minAppVersion, maxAppVersion: announcement.maxAppVersion, channels: announcement.channels } : entry) })
     if (!latest.sha) throw new ApiError(409, '数据已被其他操作修改，请刷新后重试。')
     await this.git.updateFile('manifest.json', serialize(next), latest.sha, `Update announcement ${id} in manifest`)
     return this.detail(id)

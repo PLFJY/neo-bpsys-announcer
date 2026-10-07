@@ -51,6 +51,6 @@ pnpm deploy
 
 目标仓库需要存在且有 `main` 分支。可以是只有一个初始提交的空内容仓库；不需要手工创建 `manifest.json` 或 `announcements/`。首条公告发布时，Worker 先写 `announcements/{id}.json`，再创建 `manifest.json`。之后的公告会增量更新 manifest。
 
-公开接口是 `GET /api/public/v1/manifest` 和 `GET /api/public/v1/announcements/:id`，仅返回启用的公告。manifest 每条公告包含相对于 `https://raw.gitcode.com/PLFJY/neo-bpsys-announce-source/raw/main/` 的正文 `path`、修订号与公告 JSON 原始字节的 SHA-256，供客户端获取正文并判断缓存是否需要更新。
+公开接口是 `GET /api/public/v1/manifest` 和 `GET /api/public/v1/announcements/:id`，仅返回启用的公告。新发布的 manifest 条目包含相对于 `https://raw.gitcode.com/PLFJY/neo-bpsys-announce-source/raw/main/` 的正文 `path`、修订号与公告 JSON 原始字节的 SHA-256，供客户端获取正文并判断缓存是否需要更新。读取缺少 `path` 的旧条目时，Worker 回退到 `announcements/{id}.json`。
 
 公告写入分为两次 GitCode 提交。如果正文提交成功而 manifest 提交因网络故障或并发冲突失败，可能留下未列入 manifest 的文件。该文件不会出现在公开 manifest 中，后续新建会跳过它的 ID；管理员需要在 GitCode 手工检查和清理这类孤立文件。编辑时如第二次提交失败，公开公告接口会通过 SHA-256 校验拒绝不一致内容，需在 GitCode 修复或重试编辑。
