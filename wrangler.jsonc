@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "neo-bpsys-announcer",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-05-14",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "kv_namespaces": [
+    { "binding": "SESSION_KV", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+  ]
+}
