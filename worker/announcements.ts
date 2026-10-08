@@ -1,5 +1,5 @@
 import { channels, languages, type Announcement, type AnnouncementDetail, type Channel, type Level, type Manifest, type ManifestEntry, type Translations } from '../src/types'
-import { ApiError, GitCodeClient, type GitFile } from './gitcode'
+import { ApiError, GitHubClient, type GitFile } from './github'
 
 const emptyManifest = (): Manifest => ({ schemaVersion: 1, announcements: [] })
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -96,7 +96,7 @@ const ordered = (manifest: Manifest): Manifest => ({ ...manifest, announcements:
 const announcementPath = (id: string) => `announcements/${id}.json`
 
 export class AnnouncementStore {
-  constructor(private git: GitCodeClient) {}
+  constructor(private git: GitHubClient) {}
 
   async manifest(): Promise<{ data: Manifest; sha: string | null }> {
     const file = await this.git.getFile('manifest.json')

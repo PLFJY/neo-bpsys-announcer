@@ -1,13 +1,13 @@
 import { AnnouncementStore, validateInput } from './announcements'
-import { ApiError, GitCodeClient } from './gitcode'
+import { ApiError, GitHubClient } from './github'
 
 interface Env {
   ADMIN_USERNAME: string
   ADMIN_PASSWORD: string
-  GITCODE_TOKEN: string
-  GITCODE_OWNER?: string
-  GITCODE_REPO?: string
-  GITCODE_BRANCH?: string
+  GITHUB_TOKEN: string
+  GITHUB_OWNER?: string
+  GITHUB_REPO?: string
+  GITHUB_BRANCH?: string
   SESSION_KV: KVNamespace
 }
 
@@ -91,8 +91,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   const isAdminRoute = path.startsWith('/api/admin/')
   if (isAdminRoute && !(await session(request, env))) throw new ApiError(401, '登录已失效，请重新登录。')
-  if (!env.GITCODE_TOKEN) throw new ApiError(503, 'GitCode Token 尚未配置。')
-  const store = new AnnouncementStore(new GitCodeClient(env.GITCODE_TOKEN, env.GITCODE_OWNER || 'PLFJY', env.GITCODE_REPO || 'neo-bpsys-announce-source', env.GITCODE_BRANCH || 'main'))
+  if (!env.GITHUB_TOKEN) throw new ApiError(503, 'GitHub Token 尚未配置。')
+  const store = new AnnouncementStore(new GitHubClient(env.GITHUB_TOKEN, env.GITHUB_OWNER || 'PLFJY', env.GITHUB_REPO || 'neo-bpsys-announce-source', env.GITHUB_BRANCH || 'main'))
 
   if (isAdminRoute) {
     if (path === '/api/admin/announcements') {
